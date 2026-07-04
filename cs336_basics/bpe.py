@@ -1,103 +1,101 @@
+from __future__ import annotations
+
 import os
-import sys
 
 import regex as re
 
 from .utils import find_chunk_boundaries, split_on_special_tokens
 
 PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
+PRETOKEN_PATTERN = re.compile(PAT)
+
+Word = tuple[bytes, ...]
+Pair = tuple[bytes, bytes]
+WordCounts = dict[Word, int]
+PairCounts = dict[Pair, int]
 
 
-def create_bytepair(vocab: dict[tuple[bytes, ...], int]) -> dict[tuple[bytes, bytes], int]:
-    pairs: dict[tuple[bytes, bytes], int] = {}
+def create_bytepair(vocab: WordCounts) -> PairCounts:
+    pairs: PairCounts = {}
     for word, freq in vocab.items():
         for i in range(len(word) - 1):
-            x = (word[i], word[i + 1])
-            if x in pairs:
-                pairs[x] += freq
-            else:
-                pairs[x] = freq
+            pair = (word[i], word[i + 1])
+            pairs[pair] = pairs.get(pair, 0) + freq
     return pairs
 
 
-def pretokenize(content: str, v_in) -> dict[tuple[bytes, ...], int]:
-    for match in re.finditer(PAT, content):
-        char_tuple = tuple(bytes([b]) for b in match.group().encode("utf-8"))
-        if char_tuple in v_in:
-            v_in[char_tuple] += 1
-        else:
-            v_in[char_tuple] = 1
-    return v_in
+def pretokenize(content: str, word_counts: WordCounts | None = None) -> WordCounts:
+    if word_counts is None:
+        word_counts = {}
+
+    for match in PRETOKEN_PATTERN.finditer(content):
+        word = tuple(bytes([b]) for b in match.group().encode("utf-8"))
+        word_counts[word] = word_counts.get(word, 0) + 1
+    return word_counts
 
 
-def get_best_pair(pairs: dict[tuple[bytes, bytes], int]) -> tuple[tuple[bytes, bytes], int]:
-    # @TODO need to add if pairs is None check here!
+def get_best_pair(pairs: PairCounts) -> tuple[Pair, int]:
+    if not pairs:
+        raise ValueError("Cannot choose a merge from an empty pair table.")
     return max(pairs.items(), key=lambda item: (item[1], item[0]))
 
 
-def create_merge(v_in: dict[tuple[bytes, ...], int], pair: tuple[bytes, bytes]) -> dict[tuple[bytes, ...], int]:
-    v_out: dict[tuple[bytes, ...], int] = {}
+def create_merge(word_counts: WordCounts, pair: Pair) -> WordCounts:
+    merged_counts: WordCounts = {}
     first, second = pair
-    for word, count in v_in.items():
-        new_word = []
+
+    for word, count in word_counts.items():
+        merged_word: list[bytes] = []
         i = 0
 
         while i < len(word):
-            # check if there is a combination of first, second pair, if yes append, else skip
             if i < len(word) - 1 and word[i] == first and word[i + 1] == second:
-                # collapse
-                new_word.append(first + second)
+                merged_word.append(first + second)
                 i += 2
             else:
-                new_word.append(word[i])
+                merged_word.append(word[i])
                 i += 1
 
-        v_out[tuple(new_word)] = count
+        merged_word_tuple = tuple(merged_word)
+        merged_counts[merged_word_tuple] = merged_counts.get(merged_word_tuple, 0) + count
 
-    return v_out
+    return merged_counts
 
 
 def train_bpe(
-    input_path: str | os.PathLike, vocab_size: int, special_tokens: list[str]
-) -> tuple[dict[int, bytes], list[tuple[bytes, bytes]]]:
-    first_special_token = special_tokens[0].encode("utf-8")
-    # init
-    merges: list[tuple[bytes, bytes]] = []
-    vocab: dict[int, bytes] = {i: bytes([i - 1]) for i in range(1, 257)}
-    vocab[0] = b"<|endoftext|>"
-    cur_vocab_index = 257
+    input_path: str | os.PathLike,
+    vocab_size: int,
+    special_tokens: list[str],
+) -> tuple[dict[int, bytes], list[Pair]]:
+    vocab = {i: bytes([i]) for i in range(256)}
+    vocab.update({256 + i: token.encode("utf-8") for i, token in enumerate(special_tokens)})
 
-    v_accumulator: dict[tuple[bytes, ...], int] = {}
-    with open(input_path, "rb") as f:
-        num_processes = 4
-        boundaries = find_chunk_boundaries(f, num_processes, first_special_token)
+    merges: list[Pair] = []
+    word_counts: WordCounts = {}
+
+    with open(input_path, "rb") as file:
+        if special_tokens:
+            boundaries = find_chunk_boundaries(file, 4, special_tokens[0].encode("utf-8"))
+        else:
+            file.seek(0, os.SEEK_END)
+            boundaries = [0, file.tell()]
+
         for start, end in zip(boundaries[:-1], boundaries[1:]):
-            f.seek(start)
-            chunk = f.read(end - start).decode("utf-8", errors="ignore")
-            for doc in split_on_special_tokens(chunk, special_tokens):
-                v_accumulator = pretokenize(doc, v_accumulator)
+            file.seek(start)
+            chunk = file.read(end - start).decode("utf-8", errors="ignore")
+            for document in split_on_special_tokens(chunk, special_tokens):
+                pretokenize(document, word_counts)
 
-    while cur_vocab_index < vocab_size:
-        pairs = create_bytepair(v_accumulator)
-        best = get_best_pair(pairs)
-        v_accumulator = create_merge(v_accumulator, best[0])
-        merges.append(best[0])
-        first, second = best[0]
-        vocab[cur_vocab_index] = first + second
-        cur_vocab_index += 1
+    next_vocab_index = len(vocab)
+    while next_vocab_index < vocab_size:
+        pairs = create_bytepair(word_counts)
+        if not pairs:
+            break
 
-    # done
+        best_pair, _ = get_best_pair(pairs)
+        word_counts = create_merge(word_counts, best_pair)
+        merges.append(best_pair)
+        vocab[next_vocab_index] = best_pair[0] + best_pair[1]
+        next_vocab_index += 1
+
     return vocab, merges
-
-
-# Using sys.argv to grab the path from the command line
-file_path = sys.argv[1]
-
-
-def f(x):
-    return x * x
-
-
-if __name__ == "__main__":
-    special_tokens = ["<|endoftext|>"]
-    train_bpe(file_path, 500, special_tokens)
