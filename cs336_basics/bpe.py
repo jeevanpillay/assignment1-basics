@@ -3,7 +3,7 @@ import sys
 
 import regex as re
 
-from .utils import find_chunk_boundaries
+from .utils import find_chunk_boundaries, split_on_special_tokens
 
 PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
 
@@ -20,15 +20,14 @@ def create_bytepair(vocab: dict[tuple[bytes, ...], int]) -> dict[tuple[bytes, by
     return pairs
 
 
-def create_pretokenizer(input_path) -> dict[tuple[bytes, ...], int]:
-    vocab: dict[tuple[bytes, ...], int] = {}
-    for match in re.finditer(PAT, input_path):
+def pretokenize(content: str, v_in) -> dict[tuple[bytes, ...], int]:
+    for match in re.finditer(PAT, content):
         char_tuple = tuple(bytes([b]) for b in match.group().encode("utf-8"))
-        if char_tuple in vocab:
-            vocab[char_tuple] += 1
+        if char_tuple in v_in:
+            v_in[char_tuple] += 1
         else:
-            vocab[char_tuple] = 1
-    return vocab
+            v_in[char_tuple] = 1
+    return v_in
 
 
 def get_best_pair(pairs: dict[tuple[bytes, bytes], int]) -> tuple[tuple[bytes, bytes], int]:
@@ -67,33 +66,25 @@ def train_bpe(
     vocab: dict[int, bytes] = {i: bytes([i - 1]) for i in range(1, 257)}
     vocab[0] = b"<|endoftext|>"
     cur_vocab_index = 257
+
+    v_accumulator: dict[tuple[bytes, ...], int] = {}
     with open(input_path, "rb") as f:
         num_processes = 4
         boundaries = find_chunk_boundaries(f, num_processes, first_special_token)
         for start, end in zip(boundaries[:-1], boundaries[1:]):
             f.seek(start)
             chunk = f.read(end - start).decode("utf-8", errors="ignore")
-            # Run pre-tokenization on your chunk and store the counts for each pre-token
-            v = create_pretokenizer("".join(chunk.split(special_tokens[0])))
-            while cur_vocab_index < vocab_size:
-                sorted_v = sorted(v.items(), key=lambda item: item[1], reverse=True)
-                for item in sorted_v:
-                    print(item)
-                print("next")
+            for doc in split_on_special_tokens(chunk, special_tokens):
+                v_accumulator = pretokenize(doc, v_accumulator)
 
-                pairs = create_bytepair(v)
-                # print("p", sorted(pairs.items(), key=lambda item: item[1], reverse=True))
-                if not pairs:
-                    break
-                best = get_best_pair(pairs)
-                # print("best", best)
-                v = create_merge(v, best[0])
-                merges.append(best[0])
-                first, second = best[0]
-                vocab[cur_vocab_index] = first + second
-                cur_vocab_index += 1
-
-    print(vocab, merges)
+    while cur_vocab_index < vocab_size:
+        pairs = create_bytepair(v_accumulator)
+        best = get_best_pair(pairs)
+        v_accumulator = create_merge(v_accumulator, best[0])
+        merges.append(best[0])
+        first, second = best[0]
+        vocab[cur_vocab_index] = first + second
+        cur_vocab_index += 1
 
     # done
     return vocab, merges

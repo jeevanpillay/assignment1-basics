@@ -1,4 +1,5 @@
 import os
+import re
 from typing import BinaryIO
 
 
@@ -47,3 +48,19 @@ def find_chunk_boundaries(
 
     # Make sure all boundaries are unique, but might be fewer than desired_num_chunks
     return sorted(set(chunk_boundaries))
+
+
+def split_on_special_tokens(text: str, special_tokens: list[str]) -> list[str]:
+    if not special_tokens:
+        return [text]
+
+    # Escape each token because tokens may contain regex syntax like |
+    escaped_tokens = [re.escape(tok) for tok in sorted(special_tokens, key=len, reverse=True)]
+
+    pattern = "|".join(escaped_tokens)
+
+    # re.split removes the delimiters if the pattern has no capturing group
+    pieces = re.split(pattern, text)
+
+    # Optional: drop empty strings from adjacent / leading / trailing special tokens
+    return [piece for piece in pieces if piece]
