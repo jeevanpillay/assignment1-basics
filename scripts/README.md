@@ -10,18 +10,27 @@ Run `train_bpe` with section-level timings:
 uv run python scripts/profile_bpe.py tests/fixtures/corpus.en --vocab-size 500
 ```
 
-By default, this times `pretokenize`, `create_bytepair`, and `create_merge` while still calling the real `train_bpe` implementation:
+By default, this times the merge-loop helpers and reports the remaining `train_bpe` wall time as `pretokenize_and_setup`:
 
 ```text
 create_bytepair              0.7046s calls=243
 create_merge                 0.5824s calls=243
-pretokenize                  0.0287s calls=1
+get_best_pair                0.0557s calls=243
+pretokenize_and_setup        0.0287s calls=1
 ```
 
 Use a different corpus or vocabulary size:
 
 ```bash
 uv run python scripts/profile_bpe.py data/TinyStoriesV2-GPT4-valid.txt --vocab-size 1000
+```
+
+Parallelize pretokenization:
+
+```bash
+uv run python scripts/profile_bpe.py data/TinyStoriesV2-GPT4-debug-1GB.txt \
+  --vocab-size 10000 \
+  --num-processes 4
 ```
 
 Pass special tokens explicitly:
@@ -37,7 +46,7 @@ Time a custom set of BPE helper functions:
 ```bash
 uv run python scripts/profile_bpe.py tests/fixtures/corpus.en \
   --vocab-size 500 \
-  --section pretokenize \
+  --section get_best_pair \
   --section create_bytepair \
   --section create_merge
 ```
@@ -60,6 +69,8 @@ uv run python scripts/profile_bpe.py tests/fixtures/corpus.en \
   --cprofile-output /tmp/bpe.prof \
   --cprofile-top 30
 ```
+
+With `--num-processes > 1`, `cProfile` profiles the parent process. The default `pretokenize_and_setup` residual still includes the wall time spent waiting for worker processes.
 
 Inspect the saved profile later:
 

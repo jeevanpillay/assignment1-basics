@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import cProfile
+import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from functools import wraps
@@ -13,7 +14,7 @@ import pstats
 from cs336_basics.bpe import train_bpe
 from cs336_basics.profiling import SectionProfiler
 
-DEFAULT_SECTIONS = ("pretokenize", "create_bytepair", "create_merge")
+DEFAULT_SECTIONS = ("create_bytepair", "get_best_pair", "create_merge")
 
 
 @contextmanager
@@ -45,6 +46,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Profile selected helper functions while running train_bpe normally.")
     parser.add_argument("input_path", type=Path)
     parser.add_argument("--vocab-size", type=int, default=500)
+    parser.add_argument("--num-processes", type=int, default=1)
     parser.add_argument("--special-token", dest="special_tokens", action="append")
     parser.add_argument("--no-special-tokens", action="store_true")
     parser.add_argument(
@@ -53,7 +55,7 @@ def parse_args() -> argparse.Namespace:
         action="append",
         help=(
             "Helper function to time. Can be passed multiple times. "
-            "Defaults to pretokenize, create_bytepair, and create_merge."
+            "Defaults to create_bytepair, get_best_pair, and create_merge."
         ),
     )
     parser.add_argument("--cprofile-output", type=Path)
@@ -72,12 +74,13 @@ def main() -> None:
     section_profiler = SectionProfiler()
 
     with profile_train_bpe_sections(sections, section_profiler):
+        start_time = time.perf_counter()
         if args.cprofile_output is None:
-            vocab, merges = train_bpe(args.input_path, args.vocab_size, special_tokens)
+            vocab, merges = train_bpe(args.input_path, args.vocab_size, special_tokens, args.num_processes)
         else:
             profile = cProfile.Profile()
             profile.enable()
-            vocab, merges = train_bpe(args.input_path, args.vocab_size, special_tokens)
+            vocab, merges = train_bpe(args.input_path, args.vocab_size, special_tokens, args.num_processes)
             profile.disable()
             profile.dump_stats(args.cprofile_output)
 
@@ -85,6 +88,12 @@ def main() -> None:
             stats.strip_dirs()
             stats.sort_stats("cumtime")
             stats.print_stats(args.cprofile_top)
+        total_time = time.perf_counter() - start_time
+
+    if args.sections is None:
+        profiled_time = sum(section_profiler.times.values())
+        section_profiler.times["pretokenize_and_setup"] += max(0.0, total_time - profiled_time)
+        section_profiler.calls["pretokenize_and_setup"] += 1
 
     section_profiler.report()
     print(f"\nvocab_size={len(vocab)} merges={len(merges)}")

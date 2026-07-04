@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import multiprocessing as mp
 
 import regex as re
 
@@ -13,6 +14,7 @@ Word = tuple[bytes, ...]
 Pair = tuple[bytes, bytes]
 WordCounts = dict[Word, int]
 PairCounts = dict[Pair, int]
+ChunkTask = tuple[str, int, int, tuple[str, ...]]
 
 
 def create_bytepair(vocab: WordCounts) -> PairCounts:
@@ -34,6 +36,29 @@ def pretokenize(content: str, word_counts: WordCounts | None = None) -> WordCoun
     return word_counts
 
 
+def _pretokenize_chunk(task: ChunkTask) -> WordCounts:
+    input_path, start, end, special_tokens = task
+    word_counts: WordCounts = {}
+
+    with open(input_path, "rb") as file:
+        file.seek(start)
+        chunk = file.read(end - start).decode("utf-8", errors="ignore")
+
+    for document in split_on_special_tokens(chunk, list(special_tokens)):
+        pretokenize(document, word_counts)
+
+    return word_counts
+
+
+def _pretokenize_chunks(tasks: list[ChunkTask], num_processes: int):
+    if num_processes == 1 or len(tasks) <= 1:
+        yield from map(_pretokenize_chunk, tasks)
+        return
+
+    with mp.Pool(processes=num_processes) as pool:
+        yield from pool.imap_unordered(_pretokenize_chunk, tasks)
+
+
 def get_best_pair(pairs: PairCounts) -> tuple[Pair, int]:
     if not pairs:
         raise ValueError("Cannot choose a merge from an empty pair table.")
@@ -45,18 +70,21 @@ def create_merge(word_counts: WordCounts, pair: Pair) -> WordCounts:
     first, second = pair
 
     for word, count in word_counts.items():
-        merged_word: list[bytes] = []
+        merged_word: list[bytes] | None = None
         i = 0
 
         while i < len(word):
             if i < len(word) - 1 and word[i] == first and word[i + 1] == second:
+                if merged_word is None:
+                    merged_word = list(word[:i])
                 merged_word.append(first + second)
                 i += 2
             else:
-                merged_word.append(word[i])
+                if merged_word is not None:
+                    merged_word.append(word[i])
                 i += 1
 
-        merged_word_tuple = tuple(merged_word)
+        merged_word_tuple = word if merged_word is None else tuple(merged_word)
         merged_counts[merged_word_tuple] = merged_counts.get(merged_word_tuple, 0) + count
 
     return merged_counts
@@ -66,25 +94,34 @@ def train_bpe(
     input_path: str | os.PathLike,
     vocab_size: int,
     special_tokens: list[str],
+    num_processes: int = 1,
 ) -> tuple[dict[int, bytes], list[Pair]]:
+    if num_processes < 1:
+        raise ValueError("num_processes must be at least 1.")
+
     vocab = {i: bytes([i]) for i in range(256)}
     vocab.update({256 + i: token.encode("utf-8") for i, token in enumerate(special_tokens)})
 
     merges: list[Pair] = []
     word_counts: WordCounts = {}
+    input_path_str = os.fspath(input_path)
 
     with open(input_path, "rb") as file:
         if special_tokens:
-            boundaries = find_chunk_boundaries(file, 4, special_tokens[0].encode("utf-8"))
+            boundaries = find_chunk_boundaries(file, num_processes, special_tokens[0].encode("utf-8"))
         else:
             file.seek(0, os.SEEK_END)
             boundaries = [0, file.tell()]
 
-        for start, end in zip(boundaries[:-1], boundaries[1:]):
-            file.seek(start)
-            chunk = file.read(end - start).decode("utf-8", errors="ignore")
-            for document in split_on_special_tokens(chunk, special_tokens):
-                pretokenize(document, word_counts)
+    tasks: list[ChunkTask] = [
+        (input_path_str, start, end, tuple(special_tokens))
+        for start, end in zip(boundaries[:-1], boundaries[1:])
+        if start < end
+    ]
+
+    for partial_counts in _pretokenize_chunks(tasks, num_processes):
+        for word, count in partial_counts.items():
+            word_counts[word] = word_counts.get(word, 0) + count
 
     next_vocab_index = len(vocab)
     while next_vocab_index < vocab_size:
