@@ -64,3 +64,13 @@ def split_on_special_tokens(text: str, special_tokens: list[str]) -> list[str]:
 
     # Optional: drop empty strings from adjacent / leading / trailing special tokens
     return [piece for piece in pieces if piece]
+
+
+def split_with_special_tokens(text: str, special_tokens: list[str] | None) -> list[str]:
+    if not special_tokens:
+        return [text]
+
+    escaped_tokens = [re.escape(tok) for tok in sorted(special_tokens, key=len, reverse=True)]
+
+    pattern = "(" + "|".join(escaped_tokens) + ")"
+    return [piece for piece in re.split(pattern, text) if piece]
