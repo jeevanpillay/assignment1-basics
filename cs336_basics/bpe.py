@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import os
 import multiprocessing as mp
+import os
 
 import regex as re
 
@@ -33,6 +33,7 @@ def pretokenize(content: str, word_counts: WordCounts | None = None) -> WordCoun
     for match in PRETOKEN_PATTERN.finditer(content):
         word = tuple(bytes([b]) for b in match.group().encode("utf-8"))
         word_counts[word] = word_counts.get(word, 0) + 1
+
     return word_counts
 
 
