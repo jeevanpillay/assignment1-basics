@@ -1,6 +1,6 @@
 from collections.abc import Iterable, Iterator
 
-from .bpe import Pair, WordCounts, pretokenize
+from .bpe import Pair, merge_word, pretokenize_sequence
 
 
 class TestIterator(Iterator):
@@ -29,40 +29,17 @@ class Tokenizer:
         raise NotImplementedError
 
     def encode(self, text: str) -> list[int]:
+        words = pretokenize_sequence(text)
+
+        for pair in self.merges:
+            words = [merge_word(word, pair) for word in words]
+
+        token_to_id = {token: token_id for token_id, token in self.vocab.items()}
+
         out: list[int] = []
-        # pre-tokenizer sequence
-        v = pretokenize(text)
-        print(v)
-        for item in self.merges:
-            # check if item exists in "v"
-            first, second = item
-            i = 0
-            new_v: WordCounts = {}
-            for word, count in v.items():
-                merged_word: list[bytes] | None = None
-                while i < len(word):
-                    if i < len(word) - 1 and word[i] == first and word[i + 1] == second:
-                        # should merge
-                        if merged_word is None:
-                            merged_word = list(word[:i])
-                        merged_word.append(first + second)
-                        i += 2
-                    else:
-                        # skip
-                        if merged_word is not None:
-                            merged_word.append(word[i])
-                        i += 1
-
-                merged_word_tuple = word if merged_word is None else tuple(merged_word)
-                new_v[merged_word_tuple] = count
-            v = new_v
-
-        print("v", v)
-        for token_pos in self.vocab:
-            for word in v:
-                for item in word:
-                    if self.vocab[token_pos] == item:
-                        out.append(token_pos)
+        for word in words:
+            for token in word:
+                out.append(token_to_id[token])
 
         return out
 

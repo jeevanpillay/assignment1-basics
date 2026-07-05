@@ -26,6 +26,10 @@ def create_bytepair(vocab: WordCounts) -> PairCounts:
     return pairs
 
 
+def pretokenize_sequence(content: str) -> list[Word]:
+    return [tuple(bytes([b]) for b in match.group().encode("utf-8")) for match in PRETOKEN_PATTERN.finditer(content)]
+
+
 def pretokenize(content: str, word_counts: WordCounts | None = None) -> WordCounts:
     if word_counts is None:
         word_counts = {}
@@ -89,6 +93,22 @@ def create_merge(word_counts: WordCounts, pair: Pair) -> WordCounts:
         merged_counts[merged_word_tuple] = merged_counts.get(merged_word_tuple, 0) + count
 
     return merged_counts
+
+
+def merge_word(word: Word, pair: Pair) -> Word:
+    first, second = pair
+    merged: list[bytes] = []
+    i = 0
+
+    while i < len(word):
+        if i < len(word) - 1 and word[i] == first and word[i + 1] == second:
+            merged.append(first + second)
+            i += 2
+        else:
+            merged.append(word[i])
+            i += 1
+
+    return tuple(merged)
 
 
 def train_bpe(
